@@ -1,0 +1,49 @@
+signInBtn.addEventListener("click", async () => {
+    if(!emailInput.value || !passwordInput.value){
+        alert("Enter both Gmail and App Password.");
+        return;
+    }
+    const formData = new FormData();
+    formData.append("email", emailInput.value);
+    formData.append("password", passwordInput.value);
+    
+    const res = await fetch("http://127.0.0.1:8000/login", {
+        method: "POST",
+        body: formData
+    });
+    const data = await res.json();
+    if(data.status === "success"){
+        loginPage.style.display = "none";
+        dashboardPage.style.display = "block";
+        document.body.classList.add("dashboard");
+        userEmail.textContent = emailInput.value;
+    } else {
+        alert("Login failed: " + data.message);
+    }
+});
+
+document.querySelector(".red-btn").addEventListener("click", async () => {
+    const desc = document.querySelector("textarea").value;
+    if(!desc) return alert("Enter description!");
+    const formData = new FormData();
+    formData.append("description", desc);
+    const res = await fetch("http://127.0.0.1:8000/generate", { method: "POST", body: formData });
+    const data = await res.json();
+    document.querySelector("input[placeholder='Email subject line']").value = data.subject;
+    document.querySelector("textarea[placeholder='Write your email content here...']").value = data.body;
+});
+
+document.querySelector(".send-btn").addEventListener("click", async () => {
+    const subject = document.querySelector("input[placeholder='Email subject line']").value;
+    const body = document.querySelector("textarea[placeholder='Write your email content here...']").value;
+    const contactsFile = document.querySelector(".upload-box input[type=file]").files[0];
+    const formData = new FormData();
+    formData.append("subject", subject);
+    formData.append("body", body);
+    formData.append("contacts_file", contactsFile);
+    const res = await fetch("http://127.0.0.1:8000/send", { method: "POST", body: formData });
+    const data = await res.json();
+    console.log(data.logs);
+    alert("Emails sent! Check console for logs.");
+});
+index
