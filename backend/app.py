@@ -1,3 +1,4 @@
+# backend/app.py
 import streamlit as st
 import pandas as pd
 import smtplib
@@ -7,157 +8,136 @@ from email.mime.base import MIMEBase
 from email import encoders
 import os
 from openai import OpenAI
+from fastapi import FastAPI, UploadFile, File, Form
+from fastapi.middleware.cors import CORSMiddleware
+import uvicorn
 
-st.set_page_config(page_title="AI Gmail Sender", page_icon="📧", layout="wide")
+# ------------------------
+# Streamlit Session State
+# ------------------------
+for key in [
+    "logged_in", "sender_email", "sender_password",
+    "generated_subject", "generated_body"
+]:
+    if key not in st.session_state:
+        st.session_state[key] = "" if "email" in key or "password" in key else False
 
-# -------------------------
-# Session State
-# -------------------------
-if "logged_in" not in st.session_state:
-    st.session_state.logged_in = False
-if "email" not in st.session_state:
-    st.session_state.email = ""
-if "password" not in st.session_state:
-    st.session_state.password = ""
+# ------------------------
+# FastAPI Setup
+# ------------------------
+app = FastAPI()
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # Allow all origins (for local dev)
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
-# -------------------------
-# Helper: Load HTML
-# -------------------------
-def load_html(path):
-    with open(path, "r", encoding="utf-8") as f:
-        return f.read()
+# ------------------------
+# Utility Functions
+# ------------------------
+def create_message(sender, to, subject, text, attachments):
+    msg = MIMEMultipart()
+    msg["From"] = sender
+    msg["To"] = to
+    msg["Subject"] = subject
+    msg.attach(MIMEText(text, "plain"))
+    for path in attachments:
+        part = MIMEBase("application", "octet-stream")
+        with open(path, "rb") as f:
+            part.set_payload(f.read())
+        encoders.encode_base64(part)
+        part.add_header("Content-Disposition", f"attachment; filename={os.path.basename(path)}")
+        msg.attach(part)
+    return msg
 
-# -------------------------
-# API: Login
-# -------------------------
-def api_login():
-    email = st.experimental_get_query_params().get("email", [""])[0]
-    password = st.experimental_get_query_params().get("password", [""])[0]
-
-    if not email or not password:
-        return {"success": False, "message": "Missing credentials"}
-
+def send_email(sender, password, to, msg):
     try:
         server = smtplib.SMTP("smtp.gmail.com", 587)
         server.starttls()
-        server.login(email, password)
+        server.login(sender, password)
+        server.send_message(msg)
         server.quit()
-
-        st.session_state.logged_in = True
-        st.session_state.email = email
-        st.session_state.password = password
-
-        return {"success": True, "message": "Login successful!"}
-
+        return "✅ Sent"
     except Exception as e:
-        return {"success": False, "message": str(e)}
+        return f"❌ {e}"
 
-# -------------------------
-# API: Upload CSV Contacts
-# -------------------------
-def api_upload_csv():
-    uploaded_file = st.file_uploader("file", type=["csv"])
-
-    if uploaded_file:
-        df = pd.read_csv(uploaded_file)
-        df.to_csv("contacts.csv", index=False)
-        return {"success": True, "message": "Contacts uploaded!"}
-
-    return {"success": False, "message": "No file received"}
-
-# -------------------------
-# API: AI Email Generation
-# -------------------------
-def api_generate_email():
-    desc = st.experimental_get_query_params().get("description", [""])[0]
-
-    if not desc:
-        return {"subject": "", "body": ""}
-
+def generate_email_via_openrouter(prompt):
     try:
         client = OpenAI(
             base_url="https://openrouter.ai/api/v1",
             api_key=st.secrets["openrouter"]["api_key"]
         )
-
         completion = client.chat.completions.create(
             model="meta-llama/llama-3.3-70b-instruct:free",
             messages=[
-                {"role": "system", "content": "Write a professional email"},
-                {"role": "user", "content": desc}
+                {"role": "system", "content": "You are a professional email writer."},
+                {"role": "user", "content": prompt}
             ],
-            max_tokens=200
+            temperature=0.7,
+            max_tokens=400
         )
-
-        output = completion.choices[0].message.content
-
-        subject = "Generated Subject"
-        body = output
-
-        return {"subject": subject, "body": body}
-
+        return completion.choices[0].message.content
     except Exception as e:
-        return {"subject": "", "body": f"Error: {e}"}
+        return f"Error generating email: {e}"
 
-# -------------------------
-# API: Send Emails
-# -------------------------
-def api_send_email():
-    subject = st.experimental_get_query_params().get("subject", [""])[0]
-    body = st.experimental_get_query_params().get("body", [""])[0]
+# ------------------------
+# API ENDPOINTS
+# ------------------------
+@app.post("/login")
+async def login(email: str = Form(...), password: str = Form(...)):
+    try:
+        server = smtplib.SMTP("smtp.gmail.com", 587)
+        server.starttls()
+        server.login(email, password)
+        server.quit()
+        st.session_state.logged_in = True
+        st.session_state.sender_email = email
+        st.session_state.sender_password = password
+        return {"status": "success"}
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
 
-    if not st.session_state.logged_in:
-        return {"success": False, "message": "Not logged in"}
-
-    if not os.path.exists("contacts.csv"):
-        return {"success": False, "message": "No contacts uploaded"}
-
-    df = pd.read_csv("contacts.csv")
-
-    sender = st.session_state.email
-    password = st.session_state.password
-
-    logs = []
-
-    for _, row in df.iterrows():
-        try:
-            msg = MIMEMultipart()
-            msg["From"] = sender
-            msg["To"] = row["email"]
-            msg["Subject"] = subject
-            msg.attach(MIMEText(body.replace("{{name}}", str(row.get("name", ""))), "plain"))
-
-            server = smtplib.SMTP("smtp.gmail.com", 587)
-            server.starttls()
-            server.login(sender, password)
-            server.send_message(msg)
-            server.quit()
-
-            logs.append({"email": row["email"], "status": "Sent"})
-
-        except Exception as e:
-            logs.append({"email": row["email"], "status": str(e)})
-
-    return {"success": True, "logs": logs}
-
-# -------------------------
-# Router
-# -------------------------
-
-query = st.experimental_get_query_params()
-
-if "api" in query:
-    if query["api"][0] == "login":
-        st.json(api_login())
-    elif query["api"][0] == "upload_csv":
-        st.json(api_upload_csv())
-    elif query["api"][0] == "generate_email":
-        st.json(api_generate_email())
-    elif query["api"][0] == "send_email":
-        st.json(api_send_email())
-
-else:
-    if not st.session_state.logged_in:
-        st.components.v1.html(load_html("../frontend/login.html"), height=720, scrolling=True)
+@app.post("/generate")
+async def generate_email(description: str = Form(...)):
+    prompt = f"Description: {description}\nReturn as: Subject: <subject>\nBody: <body>"
+    ai_response = generate_email_via_openrouter(prompt)
+    if "Subject:" in ai_response and "Body:" in ai_response:
+        subject = ai_response.split("Subject:")[1].split("Body:")[0].strip()
+        body = ai_response.split("Body:")[1].strip()
     else:
-        st.components.v1.html(load_html("../frontend/dashboard.html"), height=900, scrolling=True)
+        subject = "Generated Subject"
+        body = ai_response
+    st.session_state.generated_subject = subject
+    st.session_state.generated_body = body
+    return {"subject": subject, "body": body}
+
+@app.post("/send")
+async def send_emails(
+    subject: str = Form(...),
+    body: str = Form(...),
+    files: list[UploadFile] = File(None),
+    contacts_file: UploadFile = File(...)
+):
+    contacts = pd.read_csv(contacts_file.file)
+    attachment_paths = []
+    if files:
+        for f in files:
+            path = f.name
+            with open(path, "wb") as out:
+                out.write(f.file.read())
+            attachment_paths.append(path)
+    logs = []
+    for _, row in contacts.iterrows():
+        text_to_send = body.replace("{{name}}", str(row.get("name", "")))
+        msg = create_message(st.session_state.sender_email, row["email"], subject, text_to_send, attachment_paths)
+        status = send_email(st.session_state.sender_email, st.session_state.sender_password, row["email"], msg)
+        logs.append({"email": row["email"], "status": status})
+    return {"logs": logs}
+
+# ------------------------
+# Run FastAPI inside Streamlit
+# ------------------------
+if __name__ == "__main__":
+    uvicorn.run(app, host="0.0.0.0", port=8000)
